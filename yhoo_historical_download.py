@@ -7,10 +7,11 @@ Author: warif2
 
 import requests
 import re
-import os, csv
+import os
+import csv
 import datetime
-import argparse
-#import yaml
+import sys
+import pandas as pd
 
 def get_historical(tickers, day):
     url = 'https://finance.yahoo.com/quote/AAPL/history' # url for a ticker symbol, with a download link
@@ -44,69 +45,60 @@ def get_historical(tickers, day):
     etime_end = int(datetime.datetime(*eDate).timestamp())
     etime_start = etime_end - (day * 86400)
 
+    found = []
     for symbol in tickers:
         param = (symbol, etime_start, etime_end, crumb)
         fetch_url = "https://query1.finance.yahoo.com/v7/finance/download/{0}?period1={1}&period2={2}&interval=1d&events=history&crumb={3}".format(*param)
-        data = requests.get(fetch_url, cookies={'B':cookie}, timeout = 10)
+        try:
+            data = requests.get(fetch_url, cookies={'B':cookie}, timeout = 10)
+            out_file = open(os.path.join(dataDir, '%s.csv' % symbol), 'w')
+            out_file.write(data.text)
+            out_file.close()
+            if "Not Found" in data.text:
+                print(symbol + " Not Found!")
+            else:
+                print("Fetched " + symbol)
+                found.append(symbol)
+        except:
+            print(symbol + " Not Found!")
 
-        out_file = open(os.path.join(dataDir, '%s.csv' % symbol), 'w')
-        out_file.write(data.text)
-        out_file.close()
+    return found
 
 def data_combine(tck):
-    dates = []
-    output_tables = {}
-    value_index = {}
-    header = ['Dates']
-    with open("yahoo_data/%s.csv" % tck[0], 'r') as f:
-        value_types = f.readline().strip('\n').split(',')[1:]
-        for values in value_types:
-            value_index[values] = value_types.index(values)
-        for entry in f:
-            dates.append(entry.strip('\n').split(',')[0])
-
-    for values in value_types:
-        if values not in output_tables.keys():
-            output_tables[values] = []
-            for i in range(len(dates)):
-                output_tables[values].append([dates[i]])
-
+    data_in, data_out, num_day = dict(), dict(), dict()
     for symbol in tck:
-        header.append(symbol)
-        index = 0
-        with open('yahoo_data/%s.csv' % symbol, 'r') as f:
-            for line in f:
-                skip = 0
-                entry = line.strip('\n').split(',')
-                for types in value_types:
-                    value = entry[value_index[types] + 1]
-                    if value in value_index.keys():
-                        skip = 1
-                        continue
-                    else:
-                        output_tables[types][index].append(value)
-                if skip == 0:
-                    index += 1
+        data_in[symbol] = pd.read_csv('yahoo_data/%s.csv' % symbol)
+        num_day[symbol] = len(data_in[symbol])
+    # save data rows info into combine_data folder
+    row_df = pd.DataFrame(list(num_day.items()), columns=['ticker', 'num_rows'])
+    row_df.to_excel('combine_data/num_rows.xlsx', index=False)
 
-    dataDir = os.getcwd() + "/combine_data/"
-    if not os.path.exists(dataDir):
-        os.mkdir(dataDir)
+    # get merge order
+    merge_order = sorted(num_day.items(), key=lambda x: x[1], reverse=True)
 
-    for types in value_types:
-        output = csv.writer(open('combine_data/%s.csv' % types, 'w'), delimiter = ',')
-        output.writerow(header)
-        for i in range(len(output_tables[types])):
-            output.writerow(output_tables[types][i])
+    # column names
+    value_types = data_in[merge_order[0][0]].columns
+    for data_type in value_types:
+        if data_type == 'Date':
+            continue
+        else:
+            data_out[data_type] = pd.DataFrame()
+            for symbol in merge_order:
+                if data_out[data_type].empty:
+                    data_out[data_type] = pd.DataFrame(data_in[symbol[0]], columns=['Date',data_type])
+                else:
+                    data_out[data_type] = data_out[data_type].merge(data_in[symbol[0]][['Date', data_type]], how='left',
+                                                                    on='Date')
+                data_out[data_type].rename(columns={data_type: symbol[0]}, inplace=True)
 
+    # save data
+    with pd.ExcelWriter('combine_data/data.xlsx') as writer:
+        for data_type in data_out.keys():
+            data_out[data_type].to_excel(writer, sheet_name=data_type, index=False)
 
 if __name__ == '__main__':
-    # Setting up argparse
-    #parser = argparse.ArgumentParser(description = "A replacement for the yahoo-finance api which has been discontinued.Takes input of ticker symbols in .csv file and downloads tables of historical data.",
-    #                                 prog = "yhoo_historical_download.py")
-    #parser.add_argument('ticker', type = str, default = None, metavar = 'TICKER FILE', help = 'Specify path to the file of ticker symbols.')
-    #args = parser.parse_args()
-
     tickers = []
+    print("Fetching historical data from yahoo finance...")
     with open('ticker_file.csv', 'r') as tck_file:
         for tck in tck_file:
             if tck[0] == '#':
@@ -114,8 +106,11 @@ if __name__ == '__main__':
             else:
                 tickers.append(tck.strip('\n'))
 
-    # Retreive historical data for input TICKERS
-    get_historical(tickers, days)
+    # Retrieve historical data for input TICKERS
+    tickers_found = get_historical(tickers, days)
 
     # Combine all data
-    data_combine(tickers)
+    if len(tickers_found) > 0:
+        data_combine(tickers_found)
+    else:
+        print("Fetching Complete.")
